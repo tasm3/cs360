@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlparse
+from primes_in_range import get_primes
 
 
 class Registry:
@@ -116,8 +117,8 @@ def distributed_compute(payload: Dict[str, Any]) -> Dict[str, Any]:
     chunk = int(payload.get("chunk", 500_000))
 
     nodes_sorted = sorted(nodes, key=lambda n: n["node_id"])
-    slices = split_into_slices(low, high, len(nodes_sorted))
-    nodes_sorted = nodes_sorted[:len(slices)]
+    slices = split_into_slices(low, high, max(20, len(nodes_sorted) * 5))
+    slices = slices[:len(nodes_sorted)]
 
     t0 = time.perf_counter()
 
@@ -144,14 +145,14 @@ def distributed_compute(payload: Dict[str, Any]) -> Dict[str, Any]:
         req = {k: v for k, v in req.items() if v is not None}
 
         t_call0 = time.perf_counter()
-        resp = _post_json(url, req, timeout_s=3600)
+        resp = _post_json(url, req, timeout_s=15)
         t_call1 = time.perf_counter()
 
         if not resp.get("ok"):
             raise RuntimeError(f"node {node['node_id']} error: {resp}")
         
         node_elapsed_s = float(resp.get("elapsed_seconds", 0.0))
-        print(f"Node ID: {node["node_id"]} completed in: {node_elapsed_s}")
+        print(f"Node ID: {node['node_id']} completed in: {node_elapsed_s}")
 
         return {
             "node_id": node["node_id"],
@@ -167,9 +168,36 @@ def distributed_compute(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     with ThreadPoolExecutor(max_workers=min(32, len(nodes_sorted))) as ex:
-        futs = [ex.submit(call_node, node, sl) for node, sl in zip(nodes_sorted, slices)]
-        for f in as_completed(futs):
-            per_node_results.append(f.result())
+        future_map = {}
+
+        for node, sl in zip(nodes_sorted, slices):
+            fut = ex.submit(call_node, node, sl)
+            future_map[fut] = (node, sl)
+
+        for f in as_completed(future_map):
+            node, sl = future_map[f]
+            try:
+                per_node_results.append(f.result())
+            except Exception as e:
+                print(f"[primary_node] Node {node['node_id']} failed; computing slice locally {sl}. Error: {e}")
+
+                primes = get_primes(sl[0], sl[1])
+
+                local_result = {
+                    "node_id": "LOCAL_FALLBACK",
+                    "node": {"host": "127.0.0.1", "port": 0, "cpu_count": 1},
+                    "slice": list(sl),
+                    "round_trip_s": 0.0,
+                    "node_elapsed_s": 0.0,
+                    "node_sum_chunk_s": 0.0,
+                    "total_primes": len(primes),
+                    "max_prime": primes[-1] if primes else -1,
+                    "primes": None if mode == "count" else primes[:max_return_primes],
+                    "primes_truncated": (mode == "list" and len(primes) > max_return_primes),
+                }   
+
+                per_node_results.append(local_result)
+
 
     per_node_results.sort(key=lambda r: r["slice"][0])
 
