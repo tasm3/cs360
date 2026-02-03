@@ -167,6 +167,7 @@ def distributed_compute(payload: Dict[str, Any]) -> Dict[str, Any]:
             "primes_truncated": bool(resp.get("primes_truncated", False)),
         }
 
+# If a secondary node fail, compute its slice locally to let the distributed request to complete
     with ThreadPoolExecutor(max_workers=min(32, len(nodes_sorted))) as ex:
         future_map = {}
 
